@@ -2,3 +2,8 @@ target
 .settings
 .classpath
 .project
+*.pem
+*.key
+*.crt
+*.p12
+*.jks

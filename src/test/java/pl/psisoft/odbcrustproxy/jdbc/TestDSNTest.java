@@ -62,6 +62,7 @@ public class TestDSNTest {
         try (Connection conn = DriverManager.getConnection(URL, null, null)) {
             assertNotNull(conn, "Połączenie nie powinno być null");
             assertFalse(conn.isClosed(), "Połączenie powinno być aktywne");
+            assertTrue(conn.isValid(0), "Połączenie powinno być valid");
 
             String sql = "SELECT * FROM EFKA";
             try (PreparedStatement stmt = conn.prepareStatement(sql);

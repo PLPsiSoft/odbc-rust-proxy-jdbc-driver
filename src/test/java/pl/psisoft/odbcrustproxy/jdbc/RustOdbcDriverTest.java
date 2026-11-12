@@ -19,12 +19,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.Driver;
@@ -32,6 +42,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -39,11 +50,20 @@ import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLHandshakeException;
+import javax.net.ssl.SSLSocketFactory;
+
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 
 public class RustOdbcDriverTest {
 
@@ -54,109 +74,41 @@ public class RustOdbcDriverTest {
     public static void startMockServer() throws Exception {
         mockServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         mockPort = mockServer.getAddress().getPort();
-
-        // 1. /session/connect
-        mockServer.createContext("/session/connect", exchange -> {
-            String resp = "{\"session_id\":\"test_session_123\"}";
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
-        // 2. /session/autocommit
-        mockServer.createContext("/session/autocommit", exchange -> {
-            String resp = "{\"status\":\"ok\"}";
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
-        // 3. /session/commit
-        mockServer.createContext("/session/commit", exchange -> {
-            String resp = "{\"status\":\"ok\"}";
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
-        // 4. /session/rollback
-        mockServer.createContext("/session/rollback", exchange -> {
-            String resp = "{\"status\":\"ok\"}";
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
-        // 5. /session/ping
-        mockServer.createContext("/session/ping", exchange -> {
-            String resp = "{\"alive\":true}";
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
-        // 6. /session/close
-        mockServer.createContext("/session/close", exchange -> {
-            String resp = "{\"status\":\"ok\"}";
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
-        // 7. /query
-        mockServer.createContext("/query", exchange -> {
-            String resp = """
-                {
-                  "columns": [
-                    { "name": "ID", "sql_type": 4, "type_name": "INTEGER", "precision": 10, "scale": 0, "nullable": 0 },
-                    { "name": "NAZWA", "sql_type": 12, "type_name": "VARCHAR", "precision": 100, "scale": 0, "nullable": 1 },
-                    { "name": "KWOTA", "sql_type": 3, "type_name": "DECIMAL", "precision": 15, "scale": 2, "nullable": 1 }
-                  ],
-                  "rows": [
-                    ["1", "Faktura A", "1234,50"],
-                    ["2", null, "0.00"]
-                  ],
-                  "has_more": false
-                }
-                """;
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
-        // 8. /execute
-        mockServer.createContext("/execute", exchange -> {
-            String resp = "{\"affected_rows\":1}";
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        });
-
+        registerMockRoutes(mockServer);
         mockServer.start();
+    }
+
+    private static void registerMockRoutes(HttpServer server) {
+        server.createContext("/session/connect", exchange -> sendJson(exchange, "{\"session_id\":\"test_session_123\"}"));
+        server.createContext("/session/autocommit", exchange -> sendJson(exchange, "{\"status\":\"ok\"}"));
+        server.createContext("/session/commit", exchange -> sendJson(exchange, "{\"status\":\"ok\"}"));
+        server.createContext("/session/rollback", exchange -> sendJson(exchange, "{\"status\":\"ok\"}"));
+        server.createContext("/session/ping", exchange -> sendJson(exchange, "{\"alive\":true}"));
+        server.createContext("/session/close", exchange -> sendJson(exchange, "{\"status\":\"ok\"}"));
+        server.createContext("/query", exchange -> sendJson(exchange, """
+            {
+              "columns": [
+                { "name": "ID", "sql_type": 4, "type_name": "INTEGER", "precision": 10, "scale": 0, "nullable": 0 },
+                { "name": "NAZWA", "sql_type": 12, "type_name": "VARCHAR", "precision": 100, "scale": 0, "nullable": 1 },
+                { "name": "KWOTA", "sql_type": 3, "type_name": "DECIMAL", "precision": 15, "scale": 2, "nullable": 1 }
+              ],
+              "rows": [
+                ["1", "Faktura A", "1234,50"],
+                ["2", null, "0.00"]
+              ],
+              "has_more": false
+            }
+            """));
+        server.createContext("/execute", exchange -> sendJson(exchange, "{\"affected_rows\":1}"));
+    }
+
+    private static void sendJson(com.sun.net.httpserver.HttpExchange exchange, String resp) throws java.io.IOException {
+        exchange.getResponseHeaders().set("Content-Type", "application/json");
+        byte[] bytes = resp.getBytes(StandardCharsets.UTF_8);
+        exchange.sendResponseHeaders(200, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
     }
 
     @AfterAll
@@ -219,8 +171,8 @@ public class RustOdbcDriverTest {
 
     @Test
     public void testFullEfkaWorkflowSimulation() throws Exception {
-        // Symulacja DOKŁADNEGO przepływu z AuZrodloDanych i AuSql w efkawww
-        String url = "jdbc:rustodbc://127.0.0.1:" + mockPort + "/test_dsn?charset=cp852";
+        // Symulacja DOKŁADNEGO przepływu z AuZrodloDanych i AuSql w efkawww (z jawnym tls=false dla mocka HTTP)
+        String url = "jdbc:rustodbc://127.0.0.1:" + mockPort + "/test_dsn?charset=cp852&tls=false";
 
         Properties props = new Properties();
         props.put("user", "admin");
@@ -297,6 +249,155 @@ public class RustOdbcDriverTest {
 
             // 8. AuZrodloDanych.java:1006 -> conn.rollback()
             conn.rollback();
+        }
+    }
+
+    @Test
+    public void testTlsCertificatePinningAndGlobalIsolation(@TempDir Path tempDir) throws Exception {
+        SSLContext defaultSslBefore = SSLContext.getDefault();
+        SSLSocketFactory defaultSocketFactoryBefore = HttpsURLConnection.getDefaultSSLSocketFactory();
+        String trustStorePropBefore = System.getProperty("javax.net.ssl.trustStore");
+
+        CertPair pairA = generateSelfSignedCertPair(tempDir, "serverA");
+        CertPair pairB = generateSelfSignedCertPair(tempDir, "serverB");
+
+        // Uruchomienie mocka HTTPS używającego wyłącznie certyfikatu A
+        KeyStore ks = KeyStore.getInstance("PKCS12");
+        try (InputStream is = Files.newInputStream(pairA.p12Path())) {
+            ks.load(is, "changeit".toCharArray());
+        }
+        KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(ks, "changeit".toCharArray());
+        SSLContext serverSsl = SSLContext.getInstance("TLS");
+        serverSsl.init(kmf.getKeyManagers(), null, null);
+
+        HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        httpsServer.setHttpsConfigurator(new HttpsConfigurator(serverSsl));
+        registerMockRoutes(httpsServer);
+        httpsServer.start();
+        int httpsPort = httpsServer.getAddress().getPort();
+
+        try {
+            // 1. Przypadek pozytywny: przypięty właściwy certA.pem -> działa przez 127.0.0.1
+            String urlA = "jdbc:rustodbc://127.0.0.1:" + httpsPort + "/test_dsn?tlsCert="
+                    + pairA.pemPath().toAbsolutePath();
+            try (Connection conn = DriverManager.getConnection(urlA, null)) {
+                assertTrue(conn.isValid(5));
+                try (PreparedStatement stmt = conn.prepareStatement("SELECT 1");
+                     ResultSet rs = stmt.executeQuery()) {
+                    assertTrue(rs.next());
+                    assertEquals("Faktura A", rs.getString(2));
+                }
+            }
+
+            // 2. Przypadek pozytywny po DNS:localhost (weryfikacja pola SAN w certyfikacie)
+            String urlLocalhost = "jdbc:rustodbc://localhost:" + httpsPort + "/test_dsn";
+            Properties propsA = new Properties();
+            propsA.put("tlsCert", pairA.pemPath().toAbsolutePath().toString());
+            try (Connection conn = DriverManager.getConnection(urlLocalhost, propsA)) {
+                assertTrue(conn.isValid(5));
+            }
+
+            // 3. Przypadek negatywny (PSK): przypięty inny certyfikat certB.pem -> serwer z certA musi zostać odrzucony
+            String urlWrongCert = "jdbc:rustodbc://127.0.0.1:" + httpsPort + "/test_dsn?tlsCert="
+                    + pairB.pemPath().toAbsolutePath();
+            SQLException wrongCertEx = assertThrows(SQLException.class,
+                    () -> DriverManager.getConnection(urlWrongCert, null));
+            assertTrue(
+                    hasCause(wrongCertEx, SSLHandshakeException.class)
+                            || wrongCertEx.getMessage().contains("PKIX")
+                            || wrongCertEx.getMessage().contains("handshake")
+                            || wrongCertEx.getMessage().contains("certificate"),
+                    "Oczekiwano błędu weryfikacji TLS (Certificate Pinning), otrzymano: " + wrongCertEx
+            );
+
+            // 4. Przypadek Fail-Closed (Opcja A): brak certyfikatu bez ?tls=false -> czytelny wyjątek
+            String missingCertUrl = "jdbc:rustodbc://127.0.0.1:" + httpsPort + "/test_dsn?tlsCert="
+                    + tempDir.resolve("nie_istnieje.pem").toAbsolutePath();
+            SQLException missingEx = assertThrows(SQLException.class,
+                    () -> DriverManager.getConnection(missingCertUrl, null));
+            assertTrue(missingEx.getMessage().contains("Fail-Closed"));
+
+            // 5. Gwarancja pełnej izolacji: globalny SSLContext/cacerts JVM pozostał nienaruszony!
+            assertSame(defaultSslBefore, SSLContext.getDefault(),
+                    "Sterownik JDBC nie może zmieniać globalnego SSLContext.getDefault()");
+            assertSame(defaultSocketFactoryBefore, HttpsURLConnection.getDefaultSSLSocketFactory(),
+                    "Sterownik JDBC nie może zmieniać HttpsURLConnection.getDefaultSSLSocketFactory()");
+            assertEquals(trustStorePropBefore, System.getProperty("javax.net.ssl.trustStore"),
+                    "Sterownik JDBC nie może modyfikować właściwości javax.net.ssl.trustStore");
+
+            // Domyślny HttpClient aplikacji (korzystający z globalnego cacerts) nadal odrzuca self-signed certA,
+            // co dowodzi, że certA nie wyciekł do globalnego magazynu zaufania JVM:
+            HttpClient appDefaultClient = HttpClient.newHttpClient();
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create("https://127.0.0.1:" + httpsPort + "/session/ping"))
+                    .GET()
+                    .build();
+            assertThrows(SSLHandshakeException.class,
+                    () -> appDefaultClient.send(req, HttpResponse.BodyHandlers.ofString()),
+                    "Domyślny klient JVM nie powinien ufać przypiętemu certyfikatowi sterownika JDBC");
+        } finally {
+            httpsServer.stop(0);
+        }
+    }
+
+    private static boolean hasCause(Throwable t, Class<? extends Throwable> expectedType) {
+        Throwable curr = t;
+        while (curr != null) {
+            if (expectedType.isInstance(curr)) {
+                return true;
+            }
+            curr = curr.getCause();
+        }
+        return false;
+    }
+
+    private record CertPair(Path p12Path, Path pemPath) {
+    }
+
+    private static CertPair generateSelfSignedCertPair(Path dir, String name) throws Exception {
+        Path keytoolExe = Path.of(System.getProperty("java.home"), "bin", "keytool.exe");
+        String keytool = Files.exists(keytoolExe) ? keytoolExe.toString() : "keytool";
+
+        Path p12 = dir.resolve(name + ".p12");
+        Path pem = dir.resolve(name + ".pem");
+
+        runProcess(
+                keytool, "-genkeypair",
+                "-alias", "server",
+                "-keyalg", "RSA",
+                "-keysize", "2048",
+                "-validity", "365",
+                "-storetype", "PKCS12",
+                "-keystore", p12.toString(),
+                "-storepass", "changeit",
+                "-keypass", "changeit",
+                "-dname", "CN=localhost",
+                "-ext", "SAN=dns:localhost,ip:127.0.0.1",
+                "-noprompt"
+        );
+
+        runProcess(
+                keytool, "-exportcert",
+                "-alias", "server",
+                "-keystore", p12.toString(),
+                "-storepass", "changeit",
+                "-rfc",
+                "-file", pem.toString()
+        );
+
+        return new CertPair(p12, pem);
+    }
+
+    private static void runProcess(String... cmd) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        int code = p.waitFor();
+        if (code != 0) {
+            throw new IllegalStateException("Polecenie " + String.join(" ", cmd)
+                    + " zakończyło się kodem " + code + ": " + output);
         }
     }
 }

@@ -41,19 +41,18 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * Sterownik JDBC dla JDK 21+ łączący się z 32-bitowym serwerem Rust ODBC Proxy.
  *
  * Obsługiwane formaty URL:
- * 1. jdbc:rustodbc://127.0.0.1:8097/NazwaDSN[?charset=cp1250&...]
- * 2. jdbc:odbc:NazwaDSN[?charset=cp852&...] (domyślnie łączy się z lokalnym proxy na porcie 8097)
+ * 1. jdbc:rustodbc://127.0.0.1:8097/NazwaDSN[?charset=cp1250&tls=true&tlsCert=...]
+ * 2. jdbc:odbc:NazwaDSN[?charset=cp852&...] (domyślnie łączy się z lokalnym proxy na https://127.0.0.1:8097)
  */
 public class RustOdbcDriver implements Driver {
 
     public static final String RUSTODBC_PREFIX = "jdbc:rustodbc://";
     public static final String ODBC_PREFIX = "jdbc:odbc:";
-    public static final String DEFAULT_PROXY_URL = "http://127.0.0.1:8097";
+    public static final String DEFAULT_PROXY_URL = "https://127.0.0.1:8097";
+    public static final String DEFAULT_PLAIN_PROXY_URL = "http://127.0.0.1:8097";
+    public static final String SYS_PROP_TLS_ENABLED = "rustodbc.tls.enabled";
 
     public static final ObjectMapper MAPPER = new ObjectMapper();
-    public static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
 
     static {
         try {
@@ -76,74 +75,131 @@ public class RustOdbcDriver implements Driver {
             return null;
         }
 
-        String baseUrl;
+        String rawUrlPart;
         String dsn;
         Map<String, String> urlParams = new HashMap<>();
 
         String lowerUrl = url.toLowerCase(Locale.ROOT);
-        if (lowerUrl.startsWith(RUSTODBC_PREFIX)) {
+        boolean isRustOdbcScheme = lowerUrl.startsWith(RUSTODBC_PREFIX);
+        if (isRustOdbcScheme) {
             String withoutPrefix = url.substring(RUSTODBC_PREFIX.length());
             int slashIdx = withoutPrefix.indexOf('/');
             if (slashIdx < 0) {
                 throw new SQLException("Nieprawidłowy format URL jdbc:rustodbc://. Oczekiwano: jdbc:rustodbc://host:port/DSN");
             }
 
-            String hostPort = withoutPrefix.substring(0, slashIdx);
-            baseUrl = "http://" + hostPort;
+            rawUrlPart = withoutPrefix.substring(0, slashIdx);
             String pathAndQuery = withoutPrefix.substring(slashIdx + 1);
-
-            int qIdx = pathAndQuery.indexOf('?');
-            if (qIdx >= 0) {
-                dsn = pathAndQuery.substring(0, qIdx);
-                parseQueryParams(pathAndQuery.substring(qIdx + 1), urlParams);
-            } else {
-                dsn = pathAndQuery;
-            }
+            dsn = extractDsnAndParams(pathAndQuery, urlParams);
         } else {
             // jdbc:odbc:DSN[?params]
             String proxySysProp = System.getProperty("rustodbc.proxy.url");
-            if (proxySysProp != null && !proxySysProp.isBlank()) {
-                baseUrl = proxySysProp.trim();
-            } else {
-                baseUrl = DEFAULT_PROXY_URL;
-            }
+            rawUrlPart = (proxySysProp != null && !proxySysProp.isBlank()) ? proxySysProp.trim() : null;
 
             String afterPrefix = url.substring(ODBC_PREFIX.length());
-            int qIdx = afterPrefix.indexOf('?');
-            if (qIdx >= 0) {
-                dsn = afterPrefix.substring(0, qIdx);
-                parseQueryParams(afterPrefix.substring(qIdx + 1), urlParams);
-            } else {
-                dsn = afterPrefix;
-            }
+            dsn = extractDsnAndParams(afterPrefix, urlParams);
         }
 
         if (dsn.isBlank()) {
             throw new SQLException("Nazwa źródła DSN w URL nie może być pusta.");
         }
 
+        boolean tlsEnabled = resolveTlsEnabled(info, urlParams);
+        String baseUrl = buildBaseUrl(isRustOdbcScheme, rawUrlPart, tlsEnabled);
+        String tlsCertPath = resolveParam(info, urlParams, "tlsCert", "certPath");
+
+        HttpClient httpClient = tlsEnabled
+                ? TlsClientFactory.getPinnedTlsClient(tlsCertPath)
+                : TlsClientFactory.getPlainClient();
+
         // Pobieranie parametrów uwierzytelniania i kodowania
-        String user = info != null ? info.getProperty("user", "") : "";
-        if (user.isBlank() && urlParams.containsKey("user")) {
-            user = urlParams.get("user");
-        }
+        String user = resolveParam(info, urlParams, "user");
+        if (user == null) user = "";
 
-        String password = info != null ? info.getProperty("password", "") : "";
-        if (password.isBlank() && urlParams.containsKey("password")) {
-            password = urlParams.get("password");
-        }
+        String password = resolveParam(info, urlParams, "password");
+        if (password == null) password = "";
 
-        String charset = null;
+        String charset = resolveParam(info, urlParams, "charset", "charSet");
+
+        return createSessionConnection(httpClient, baseUrl, dsn, user, password, charset);
+    }
+
+    private static String extractDsnAndParams(String pathAndQuery, Map<String, String> urlParams) {
+        int qIdx = pathAndQuery.indexOf('?');
+        if (qIdx >= 0) {
+            parseQueryParams(pathAndQuery.substring(qIdx + 1), urlParams);
+            return pathAndQuery.substring(0, qIdx);
+        }
+        return pathAndQuery;
+    }
+
+    private static String resolveParam(Properties info, Map<String, String> urlParams, String... keys) {
         if (info != null) {
-            charset = info.getProperty("charset");
-            if (charset == null) charset = info.getProperty("charSet");
+            for (String key : keys) {
+                String val = info.getProperty(key);
+                if (val != null && !val.isBlank()) {
+                    return val;
+                }
+            }
         }
-        if (charset == null) {
-            charset = urlParams.get("charset");
-            if (charset == null) charset = urlParams.get("charset");
+        for (String key : keys) {
+            String val = urlParams.get(key.toLowerCase(Locale.ROOT));
+            if (val != null && !val.isBlank()) {
+                return val;
+            }
+        }
+        return null;
+    }
+
+    private static boolean resolveTlsEnabled(Properties info, Map<String, String> urlParams) throws SQLException {
+        String raw = resolveParam(info, urlParams, "tls", "ssl", "useSSL");
+        if (raw != null) {
+            return parseBoolStrict(raw, "parametru tls/ssl");
+        }
+        String sysProp = System.getProperty(SYS_PROP_TLS_ENABLED);
+        if (sysProp != null && !sysProp.isBlank()) {
+            return parseBoolStrict(sysProp, "właściwości JVM -D" + SYS_PROP_TLS_ENABLED);
+        }
+        return true; // Opcja A: Fail-Closed (TLS domyślnie włączony)
+    }
+
+    private static boolean parseBoolStrict(String raw, String source) throws SQLException {
+        String norm = raw.trim().toLowerCase(Locale.ROOT);
+        return switch (norm) {
+            case "true", "1", "yes", "on" -> true;
+            case "false", "0", "no", "off" -> false;
+            default -> throw new SQLException("Nieprawidłowa wartość logiczna dla " + source + ": '" + raw + "'");
+        };
+    }
+
+    private static String buildBaseUrl(boolean isRustOdbcScheme, String rawUrlPart, boolean tlsEnabled) throws SQLException {
+        if (isRustOdbcScheme) {
+            String scheme = tlsEnabled ? "https://" : "http://";
+            return scheme + rawUrlPart;
         }
 
-        return createSessionConnection(baseUrl, dsn, user, password, charset);
+        if (rawUrlPart == null) {
+            return tlsEnabled ? DEFAULT_PROXY_URL : DEFAULT_PLAIN_PROXY_URL;
+        }
+
+        String trimmed = rawUrlPart.endsWith("/") ? rawUrlPart.substring(0, rawUrlPart.length() - 1) : rawUrlPart;
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("http://")) {
+            if (tlsEnabled) {
+                throw new SQLException(
+                        "BŁĄD TLS (Fail-Closed): Właściwość 'rustodbc.proxy.url' wskazuje nieszyfrowane 'http://' przy aktywnym TLS. "
+                                + "Zmień na 'https://' lub wyłącz TLS przez '?tls=false'."
+                );
+            }
+            return trimmed;
+        }
+        if (lower.startsWith("https://")) {
+            if (!tlsEnabled) {
+                return "http://" + trimmed.substring("https://".length());
+            }
+            return trimmed;
+        }
+        return (tlsEnabled ? "https://" : "http://") + trimmed;
     }
 
     private static void parseQueryParams(String queryString, Map<String, String> outParams) {
@@ -160,6 +216,7 @@ public class RustOdbcDriver implements Driver {
     }
 
     private static Connection createSessionConnection(
+            HttpClient httpClient,
             String baseUrl,
             String dsn,
             String user,
@@ -186,7 +243,7 @@ public class RustOdbcDriver implements Driver {
                     .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 JsonNode errNode = MAPPER.readTree(response.body());
                 throw new SQLException("Nie udało się nawiązać sesji ODBC przez serwer Rust: "
@@ -199,7 +256,7 @@ public class RustOdbcDriver implements Driver {
                 throw new SQLException("Serwer Rust nie zwrócił poprawnego identyfikatora sesji.");
             }
 
-            return new RustOdbcConnection(baseUrl, sessionId, dsn, user, charset);
+            return new RustOdbcConnection(baseUrl, sessionId, dsn, user, charset, httpClient);
 
         } catch (SQLException e) {
             throw e;

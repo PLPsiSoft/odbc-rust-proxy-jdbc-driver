@@ -15,6 +15,26 @@ Stanowi bezpośredni, nowoczesny zamiennik dla wycofanego w Java 8 systemowego m
 * **Zapytania sparametryzowane**: `PreparedStatement` z obsługą typów `setString`, `setInt`, `setDouble`, `setBigDecimal`, `setDate`, `setTimestamp` oraz poprawnym wiązaniem `NULL` (`setNull`).
 * **Stronicowanie kursorów (`fetchSize`)**: Bezpieczne pobieranie dużych zbiorów danych partiami bez ryzyka przepełnienia pamięci RAM.
 * **Polskie strony kodowe**: Transparentne dekodowanie CP852 (DOS Latin-2 / `EE8PC852`), Windows-1250 (`EE8MSWIN1250`), ISO-8859-2 oraz UTF-8.
+* **Bezpieczeństwo TLS i Certificate Pinning**: Domyślna komunikacja po **HTTPS** (port `8097`) z przypiętym certyfikatem serwera (`cert.pem`) w pustym magazynie `KeyStore` w pamięci RAM (z pełną izolacją — bez ingerencji w globalny magazyn `cacerts` aplikacji hostującej).
+
+---
+
+## Bezpieczeństwo TLS (Certificate Pinning)
+
+Sterownik realizuje koncepcję szyfrowania zbliżoną do **PSK (Pre-Shared Key)** na bazie TLS:
+
+1. Tworzy w pamięci RAM pusty `KeyStore` i wczytuje wyłącznie publiczny certyfikat serwera proxy (`cert.pem`). Systemowe urzędy certyfikacji (`cacerts`) są przez tego klienta ignorowane — każdy inny certyfikat zostaje natychmiast odrzucony (`SSLHandshakeException`).
+2. **Pełna izolacja JVM**: Prywatny `SSLContext` jest przekazywany wyłącznie do wewnętrznego klienta `java.net.http.HttpClient` sterownika JDBC. Sterownik **nigdy nie wywołuje** `SSLContext.setDefault(...)` ani nie zmienia `javax.net.ssl.trustStore`, dzięki czemu pozostały ruch HTTPS aplikacji (np. KSeF, banki, WebService'y) działa bez zmian.
+3. **Polityka Fail-Closed**: Domyślnie połączenie wymaga TLS (`tls=true`). Brak `cert.pem` skutkuje czytelnym wyjątkiem `SQLException` (brak cichego przełączenia na nieszyfrowany HTTP).
+
+### Kolejność wyszukiwania pliku `cert.pem`:
+1. Parametr połączenia w URL lub `Properties`: `tlsCert` / `certPath` (np. `?tlsCert=C:/certs/cert.pem`)
+2. Właściwość systemowa JVM: `-Drustodbc.tls.cert=C:\certs\cert.pem`
+3. Zmienna środowiskowa: `RUSTODBC_TLS_CERT`
+4. Zasób na classpath aplikacji / w JAR: `/cert.pem` lub `/certs/cert.pem`
+5. Plik `cert.pem` w bieżącym katalogu roboczym.
+
+Aby jawnie wyłączyć szyfrowanie wyłącznie do lokalnych testów, dodaj parametr `?tls=false` (lub ustaw `-Drustodbc.tls.enabled=false`).
 
 ---
 
@@ -26,14 +46,14 @@ jdbc:rustodbc://[host:port]/DSN[?parametry]
 ```
 Przykłady:
 ```java
-// Domyślny port proxy 8097, źródło DSN "Test"
+// Domyślny port proxy 8097 (HTTPS z Certificate Pinning), źródło DSN "Test"
 String url = "jdbc:rustodbc://127.0.0.1:8097/Test";
 
-// Z podaniem kodowania DOS CP852 dla starych baz dBase/FoxPro
-String url = "jdbc:rustodbc://127.0.0.1:8097/Test?charset=cp852";
+// Z podaniem kodowania DOS CP852 oraz jawnej ścieżki do cert.pem
+String url = "jdbc:rustodbc://127.0.0.1:8097/Test?charset=cp852&tlsCert=C:/certs/cert.pem";
 
-// Zdalny serwer proxy
-String url = "jdbc:rustodbc://192.168.1.50:8097/FirmaDSN?charset=cp1250";
+// Wyłącznie do testów bez TLS (wymaga flagi --no-tls na serwerze proxy)
+String url = "jdbc:rustodbc://127.0.0.1:8097/Test?tls=false";
 ```
 
 ### 2. Tradycyjny format `jdbc:odbc:` (Drop-in Replacement)
@@ -46,7 +66,7 @@ Przykłady:
 String url = "jdbc:odbc:Test";
 String url = "jdbc:odbc:Test?charset=cp852";
 ```
-*Domyślnie sterownik kieruje ruch na `http://127.0.0.1:8097`. Adres serwera proxy można zmienić globalną właściwością JVM: `-Drustodbc.proxy.url=http://host:port`.*
+*Domyślnie sterownik kieruje ruch na `https://127.0.0.1:8097`. Adres serwera proxy można zmienić właściwością JVM: `-Drustodbc.proxy.url=https://host:port`.*
 
 ---
 
@@ -66,6 +86,8 @@ public class PrzykladUzycia {
         props.put("charset", "cp852"); // lub EE8PC852
         props.put("user", "admin");
         props.put("password", "tajne");
+        // Certyfikat do przypięcia (można też umieścić jako /cert.pem na classpath lub przez -Drustodbc.tls.cert)
+        props.put("tlsCert", "C:/certs/cert.pem");
 
         String url = "jdbc:rustodbc://127.0.0.1:8097/Test";
 

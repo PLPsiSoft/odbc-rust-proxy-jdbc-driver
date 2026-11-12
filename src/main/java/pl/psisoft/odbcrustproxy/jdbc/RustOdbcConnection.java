@@ -15,6 +15,7 @@
 package pl.psisoft.odbcrustproxy.jdbc;
 
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Array;
@@ -25,7 +26,6 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.NClob;
 import java.sql.PreparedStatement;
-import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.sql.SQLXML;
@@ -47,6 +47,7 @@ public class RustOdbcConnection implements Connection {
     private final String dsn;
     private final String user;
     private final String charset;
+    private final HttpClient httpClient;
     private final Properties clientInfo = new Properties();
 
     private boolean autoCommit = true;
@@ -54,11 +55,16 @@ public class RustOdbcConnection implements Connection {
     private boolean closed = false;
 
     public RustOdbcConnection(String baseUrl, String sessionId, String dsn, String user, String charset) {
+        this(baseUrl, sessionId, dsn, user, charset, TlsClientFactory.getPlainClient());
+    }
+
+    public RustOdbcConnection(String baseUrl, String sessionId, String dsn, String user, String charset, HttpClient httpClient) {
         this.baseUrl = baseUrl;
         this.sessionId = sessionId;
         this.dsn = dsn;
         this.user = user;
         this.charset = charset;
+        this.httpClient = httpClient;
     }
 
     public String getBaseUrl() { return baseUrl; }
@@ -66,6 +72,7 @@ public class RustOdbcConnection implements Connection {
     public String getDsn() { return dsn; }
     public String getUser() { return user; }
     public String getCharset() { return charset; }
+    public HttpClient getHttpClient() { return httpClient; }
 
     private void checkClosed() throws SQLException {
         if (closed) {
@@ -139,7 +146,7 @@ public class RustOdbcConnection implements Connection {
                     .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = this.httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 JsonNode errNode = RustOdbcDriver.MAPPER.readTree(response.body());
                 throw new SQLException("Błąd setAutoCommit z serwera Rust: " + errNode.path("error").asText(response.body()));
@@ -173,7 +180,7 @@ public class RustOdbcConnection implements Connection {
                     .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = this.httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 JsonNode errNode = RustOdbcDriver.MAPPER.readTree(response.body());
                 throw new SQLException("Błąd commit z serwera Rust: " + errNode.path("error").asText(response.body()));
@@ -199,7 +206,7 @@ public class RustOdbcConnection implements Connection {
                     .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = this.httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 JsonNode errNode = RustOdbcDriver.MAPPER.readTree(response.body());
                 throw new SQLException("Błąd rollback z serwera Rust: " + errNode.path("error").asText(response.body()));
@@ -241,7 +248,7 @@ public class RustOdbcConnection implements Connection {
                     .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = this.httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 return false;
             }
@@ -267,7 +274,7 @@ public class RustOdbcConnection implements Connection {
                         .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                         .build();
 
-                RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.discarding());
+                this.httpClient.send(request, HttpResponse.BodyHandlers.discarding());
             } catch (Exception ignored) {
             }
         }

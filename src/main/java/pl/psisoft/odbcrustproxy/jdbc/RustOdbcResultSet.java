@@ -127,7 +127,7 @@ public class RustOdbcResultSet implements ResultSet {
                     .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = connection.getHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 JsonNode errNode = RustOdbcDriver.MAPPER.readTree(response.body());
                 throw new SQLException("Błąd fetch z serwera Rust: " + errNode.path("error").asText(response.body()));
@@ -377,7 +377,7 @@ public class RustOdbcResultSet implements ResultSet {
                             .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                             .build();
 
-                    RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.discarding());
+                    connection.getHttpClient().send(request, HttpResponse.BodyHandlers.discarding());
                 } catch (Exception ignored) {
                 }
             }

@@ -158,7 +158,7 @@ public class RustOdbcStatement implements PreparedStatement {
                     .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = connection.getHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 JsonNode errNode = RustOdbcDriver.MAPPER.readTree(response.body());
                 throw new SQLException("Błąd ODBC z serwera Rust: " + errNode.path("error").asText(response.body()));
@@ -242,7 +242,7 @@ public class RustOdbcStatement implements PreparedStatement {
                     .POST(HttpRequest.BodyPublishers.ofString(RustOdbcDriver.MAPPER.writeValueAsString(payload)))
                     .build();
 
-            HttpResponse<String> response = RustOdbcDriver.HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = connection.getHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 JsonNode errNode = RustOdbcDriver.MAPPER.readTree(response.body());
                 throw new SQLException("Błąd ODBC z serwera Rust: " + errNode.path("error").asText(response.body()));
