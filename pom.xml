@@ -2,7 +2,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>jdbc</groupId>
   <artifactId>pl.psisoft.odbc-rust-proxy</artifactId>
-  <version>0.0.1</version>
+  <version>0.2.0</version>
   <packaging>jar</packaging>
   <url>https://github.com/PLPsiSoft/odbc-rust-proxy-jdbc-driver</url>
 

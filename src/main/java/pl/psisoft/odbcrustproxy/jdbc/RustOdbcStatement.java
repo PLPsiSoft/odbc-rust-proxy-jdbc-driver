@@ -65,7 +65,6 @@ public class RustOdbcStatement implements PreparedStatement {
     private ResultSet currentResultSet;
     private int updateCount = -1;
     private boolean closed = false;
-    private boolean cancelled = false;
 
     public RustOdbcStatement(RustOdbcConnection connection, String initialSql) {
         this.connection = connection;
@@ -123,7 +122,6 @@ public class RustOdbcStatement implements PreparedStatement {
     @Override
     public ResultSet executeQuery(String sql) throws SQLException {
         checkClosed();
-        this.cancelled = false;
         String sqlToRun = (sql != null && !sql.isBlank()) ? sql : initialSql;
         if (sqlToRun == null || sqlToRun.isBlank()) {
             throw new SQLException("Brak zapytania SQL do wykonania.");
@@ -213,7 +211,6 @@ public class RustOdbcStatement implements PreparedStatement {
     @Override
     public int executeUpdate(String sql) throws SQLException {
         checkClosed();
-        this.cancelled = false;
         String sqlToRun = (sql != null && !sql.isBlank()) ? sql : initialSql;
         if (sqlToRun == null || sqlToRun.isBlank()) {
             throw new SQLException("Brak instrukcji SQL do wykonania.");
@@ -289,8 +286,6 @@ public class RustOdbcStatement implements PreparedStatement {
 
     @Override
     public void cancel() throws SQLException {
-        this.cancelled = true;
-        // Bezpieczne oznaczenie anulowania - nie rzuca błędu podczas zamykania/abort
     }
 
     @Override
